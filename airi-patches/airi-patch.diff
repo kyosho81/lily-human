@@ -557,7 +557,7 @@ index ff612f2..af445d4 100644
    vision: { provider: OFFICIAL_VISION_PROVIDER_ID, model: 'auto' },
  } as const
 diff --git a/packages/stage-ui/src/stores/modules/hearing.ts b/packages/stage-ui/src/stores/modules/hearing.ts
-index cf5331e..0c80298 100644
+index cf5331e..454a056 100644
 --- a/packages/stage-ui/src/stores/modules/hearing.ts
 +++ b/packages/stage-ui/src/stores/modules/hearing.ts
 @@ -25,6 +25,7 @@ import { createVadStreamingSession } from '../../libs/audio/vad-streaming-sessio
@@ -609,7 +609,7 @@ index cf5331e..0c80298 100644
  
        if (useVerboseJson) {
          if (response.segments) {
-@@ -1001,6 +1010,10 @@ export const useHearingSpeechInputPipeline = defineStore('modules:hearing:speech
+@@ -1001,6 +1010,14 @@ export const useHearingSpeechInputPipeline = defineStore('modules:hearing:speech
    ) {
      let vadSession!: NonNullable<typeof streamingVadSession.value>
      const vad = useVAD(vadWorkletUrl, {
@@ -617,6 +617,10 @@ index cf5331e..0c80298 100644
 +      // 默认 1200ms 太慢（说完还要等 1.2s），600ms 更接近自然对话节奏；
 +      // 若觉得会被中途切断（停顿较长的从句被截断），可调大到 700~800。
 +      minSilenceDurationMs: 600,
++      // VAD 触发前的音频回补。默认 360ms 偏短：弱起音音节（啊/哦/嗯、w/y 开头）
++      // 概率爬升慢，检测延迟可达 200~400ms，句首第一字容易掉出 pad 被丢。
++      // 700ms 前导静音对 SenseVoice/whisper 转写无害（服务端自带 VAD 与抗噪）。
++      speechPadMs: 700,
        onSpeechStart: () => {
          const segment: VadSpeechSegment = { audioChunks: [] }
          vadSession.activeSegment = segment
