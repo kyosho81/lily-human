@@ -149,7 +149,7 @@ def speech(req: SpeechRequest, request: Request):
             text,
             prompt_wav_path=prompt_wav,
             prompt_text=prompt_text,
-            inference_timesteps=6,  # 默认10步；6步提速约40%，中文听感差别很小
+            inference_timesteps=6,  # 默认10步；6步平衡速度与听感（此前调为4步提速，现改回）
         )
     dur = time.time() - t0
     with recent_lock:

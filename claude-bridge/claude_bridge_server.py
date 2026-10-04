@@ -97,6 +97,12 @@ class Task:
         self.result = ""
         self.error = None
         self.started_at = time.time()
+        self.cancelled = False
+        self.gen = None             # claude sdk generator, closed on cancel
+        # Human-readable label shown in the UI instead of the raw hex id.
+        t = self.started_at
+        self.started_at_ms = (time.strftime("%H:%M:%S", time.localtime(t))
+                              + ".%03d" % int((t % 1) * 1000))
 
     async def emit(self, ev):
         await self.queue.put(ev)
@@ -180,7 +186,11 @@ async def _run_task(task: Task):
 
     final_text = ""
     try:
-        async for msg in query(prompt=task.prompt, options=options):
+        gen = query(prompt=task.prompt, options=options)
+        task.gen = gen
+        async for msg in gen:
+            if task.cancelled:
+                break
             mtype = type(msg).__name__
             if mtype == "AssistantMessage":
                 for block in msg.content:
@@ -200,16 +210,27 @@ async def _run_task(task: Task):
                 if isinstance(content, str):
                     pass  # raw user echo; ignore
             elif mtype == "ResultMessage":
+                if task.cancelled:
+                    break
                 task.result = getattr(msg, "result", "") or final_text
                 task.status = "done"
                 await task.emit({"type": "done", "result": task.result,
                                  "is_error": bool(getattr(msg, "is_error", False))})
                 _log(f"task={task.id} 完成 result={task.result[:50]}")
+        if task.cancelled:
+            await gen.aclose()
+            task.status = "cancelled"
+            await task.emit({"type": "cancelled"})
+            _log(f"task={task.id} 已取消")
     except Exception as e:
-        task.status = "error"
-        task.error = f"{type(e).__name__}: {e}"
-        await task.emit({"type": "error", "message": task.error})
-        _log(f"task={task.id} 出错: {task.error}")
+        if task.cancelled:
+            task.status = "cancelled"
+            await task.emit({"type": "cancelled"})
+        else:
+            task.status = "error"
+            task.error = f"{type(e).__name__}: {e}"
+            await task.emit({"type": "error", "message": task.error})
+            _log(f"task={task.id} 出错: {task.error}")
 
 
 # ---------------------------------------------------------------- http api
@@ -256,7 +277,7 @@ async def run(req: RunRequest):
                 TASKS.pop(tid, None)
     asyncio.create_task(_run_task(task))
     _log(f"task={task_id} 启动 cwd={req.cwd_key} prompt={req.prompt[:40]}")
-    return {"task_id": task_id}
+    return {"task_id": task_id, "started_at_ms": task.started_at_ms}
 
 
 @app.get("/tasks")
@@ -268,6 +289,7 @@ async def list_tasks():
         "pending": len(t.pending),
         "preview": next((p.get("preview", "") for p in t.pending.values()), ""),
         "started_at": time.strftime("%H:%M:%S", time.localtime(t.started_at)),
+        "started_at_ms": t.started_at_ms,
         "elapsed_s": round(time.time() - t.started_at, 1),
         "result": (t.result or "")[:80],
     } for t in items[:20]]}
@@ -279,6 +301,7 @@ async def task_status(task_id: str):
     if not task:
         raise HTTPException(404, "task not found")
     return {"task_id": task_id, "status": task.status, "cwd_key": task.cwd_key,
+            "started_at_ms": task.started_at_ms,
             "pending": [{"request_id": rid, "tool_name": p["tool_name"],
                          "input": p["input"], "preview": p.get("preview", "")}
                         for rid, p in task.pending.items()],
@@ -301,7 +324,7 @@ async def task_events(task_id: str):
                 yield ": ping\n\n"
                 continue
             yield f"data: {json.dumps(ev, ensure_ascii=False)}\n\n"
-            if ev.get("type") in ("done", "error"):
+            if ev.get("type") in ("done", "error", "cancelled"):
                 break
 
     return StreamingResponse(stream(), media_type="text/event-stream")
@@ -335,6 +358,38 @@ async def answer(task_id: str, req: AnswerRequest):
         result = PermissionResultAllow()
     future.set_result(result)
     _log(f"task={task_id} 答复 request={req.request_id} behavior={req.behavior}")
+    return {"ok": True}
+
+
+@app.post("/tasks/{task_id}/cancel")
+async def cancel_task(task_id: str):
+    from claude_agent_sdk.types import PermissionResultDeny
+
+    task = TASKS.get(task_id)
+    if not task:
+        raise HTTPException(404, "task not found")
+    if task.status not in ("running", "waiting"):
+        return {"ok": False, "error": f"task is {task.status}"}
+    task.cancelled = True
+    # Release any pending permission wait so the SDK turn can unwind.
+    for p in list(task.pending.values()):
+        future = p["future"]
+        if not future.done():
+            future.set_result(PermissionResultDeny(message="用户取消了任务"))
+    _log(f"task={task_id} 取消请求")
+    return {"ok": True}
+
+
+@app.delete("/tasks/{task_id}")
+async def delete_task(task_id: str):
+    async with TASKS_LOCK:
+        task = TASKS.get(task_id)
+        if not task:
+            raise HTTPException(404, "task not found")
+        if task.status in ("running", "waiting"):
+            raise HTTPException(409, "cancel the task before deleting it")
+        TASKS.pop(task_id, None)
+    _log(f"task={task_id} 已删除")
     return {"ok": True}
 
 

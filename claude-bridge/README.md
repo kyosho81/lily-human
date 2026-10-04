@@ -66,6 +66,8 @@ AIRI 侧三个新文件（都在 airi 仓库内）：
 | POST | `/run` | `{prompt, cwd_key}` → `{task_id}`，立即返回，后台执行 |
 | GET | `/tasks/{id}/events` | SSE 事件流：`hello / tool_start / text / log / waiting_input / done / error` |
 | POST | `/tasks/{id}/answer` | 答复挂起提问 `{request_id, behavior: "allow"\|"deny", answers?, message?}` |
+| POST | `/tasks/{id}/cancel` | 强制取消运行中/等待中的任务（挂起的提问按拒绝解开） |
+| DELETE | `/tasks/{id}` | 删除已结束的任务（运行中需先取消，否则 409） |
 | GET | `/tasks` | 任务列表（最近 20 个：状态 / 挂起数 / 预览 / 结果摘要） |
 | GET | `/tasks/{id}` | 状态快照（status / pending 列表含 preview / result / error / elapsed_s） |
 
