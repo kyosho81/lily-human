@@ -1,0 +1,422 @@
+diff --git a/apps/stage-web/src/App.vue b/apps/stage-web/src/App.vue
+index e930e40..a844341 100644
+--- a/apps/stage-web/src/App.vue
++++ b/apps/stage-web/src/App.vue
+@@ -6,7 +6,9 @@ import { usePiniaSynced } from '@proj-airi/stage-ui/libs/pinia'
+ import { initializeAnalytics, isAnalyticsAvailableInBuild } from '@proj-airi/stage-ui/libs/product-signals'
+ import { useAuthStore } from '@proj-airi/stage-ui/stores/auth'
+ import { useCharacterOrchestratorStore } from '@proj-airi/stage-ui/stores/character'
++import { useLlmToolsStore } from '@proj-airi/stage-ui/stores/ai/chat-llm/tools'
+ import { useChatStore } from '@proj-airi/stage-ui/stores/chat'
++import { createClaudeCodeTools } from '@proj-airi/stage-ui/tools/claude-code'
+ import { useDisplayModelsStore } from '@proj-airi/stage-ui/stores/display-models'
+ import { useModsServerChannelStore } from '@proj-airi/stage-ui/stores/mods/api/channel-server'
+ import { useContextBridgeStore } from '@proj-airi/stage-ui/stores/mods/api/context-bridge'
+@@ -29,6 +31,7 @@ import { RouterView, useRouter } from 'vue-router'
+ import { toast, Toaster } from 'vue-sonner'
+ 
+ import PerformanceOverlay from './components/Devtools/PerformanceOverlay.vue'
++import ClaudeBridgePanel from './components/ClaudeBridgePanel.vue'
+ 
+ import { usePWAStore } from './stores/pwa'
+ 
+@@ -44,6 +47,17 @@ const settings = storeToRefs(settingsStore)
+ const onboardingStore = useOnboardingStore()
+ const chatStore = useChatStore()
+ const syncedPinia = usePiniaSynced()
++const llmToolsStore = useLlmToolsStore()
++if (localStorage.getItem('settings/claude-bridge/enabled') === 'true') {
++  // Register in EVERY tab, not just the sync leader: tool definitions sync
++  // across tabs but the executor map is local to each tab. A follower tab that
++  // never calls addTools shows the tool to the model yet answers every call
++  // with `Tool "claude_task" is not available now.` addTools dedupes by id,
++  // so calling it in all tabs is safe.
++  llmToolsStore.addTools(...createClaudeCodeTools())
++  // Diagnostic: lets support read tool registration state from any tab's console.
++  ;(window as any).__AIRI_CLAUDE_TOOLS__ = llmToolsStore.activeTools.map(t => t.function.name)
++}
+ const serverChannelStore = useModsServerChannelStore()
+ const characterOrchestratorStore = useCharacterOrchestratorStore()
+ const settingsAudioDeviceStore = useSettingsAudioDevice()
+@@ -225,6 +239,7 @@ function openOnboardingAfterStartup() {
+       @skipped="onboardingStore.markSetupSkipped()"
+     />
+ 
++    <ClaudeBridgePanel />
+     <PerformanceOverlay />
+   </StartupOverlay>
+ </template>
+diff --git a/apps/stage-web/src/main.ts b/apps/stage-web/src/main.ts
+index 4bdf8e0..a0a3fa4 100644
+--- a/apps/stage-web/src/main.ts
++++ b/apps/stage-web/src/main.ts
+@@ -1,6 +1,20 @@
+ import type { Plugin } from 'vue'
+ import type { Router, RouteRecordRaw } from 'vue-router'
+ 
++// Polyfill for older browsers (Chrome < 119) missing Promise.withResolvers
++// Must run before any other import: side-effect imports below execute in order
++if (typeof Promise.withResolvers !== 'function') {
++  Promise.withResolvers = function <T>() {
++    let resolve!: (value: T | PromiseLike<T>) => void
++    let reject!: (reason?: unknown) => void
++    const promise = new Promise<T>((res, rej) => {
++      resolve = res
++      reject = rej
++    })
++    return { promise, resolve, reject }
++  }
++}
++
+ import Tres from '@tresjs/core'
+ import NProgress from 'nprogress'
+ 
+diff --git a/apps/stage-web/vite.config.ts b/apps/stage-web/vite.config.ts
+index c9e514b..26db2cd 100644
+--- a/apps/stage-web/vite.config.ts
++++ b/apps/stage-web/vite.config.ts
+@@ -194,7 +194,10 @@ export default defineConfig({
+     ...(env.TARGET_HUGGINGFACE_SPACE
+       ? []
+       : [VitePWA({
+-          registerType: 'prompt',
++          registerType: 'autoUpdate',
++          // 本地单机使用不需要离线缓存；旧 SW 会把整页旧代码缓存在浏览器里，
++          // 导致"服务器已更新、浏览器永远跑旧版"。selfDestroying 让新 SW 自我注销并清空缓存。
++          selfDestroying: true,
+           includeAssets: ['favicon.svg', 'apple-touch-icon.png'],
+           manifest: {
+             name: 'AIRI',
+diff --git a/packages/core-agent/src/messages/chat-completions.ts b/packages/core-agent/src/messages/chat-completions.ts
+index 7c2bf3f..7b0c172 100644
+--- a/packages/core-agent/src/messages/chat-completions.ts
++++ b/packages/core-agent/src/messages/chat-completions.ts
+@@ -171,7 +171,7 @@ export function conversationToChatMessages(conversation: Conversation, supportsC
+   // They implement only the string variant of Chat Completions content.
+   // Source/context: https://github.com/moeru-ai/airi/issues/1500
+   // Removal condition: All supported endpoints accept content arrays.
+-  return conversation.turns.flatMap((turn) => {
++  const messages = conversation.turns.flatMap((turn) => {
+     if (turn.type !== 'assistant')
+       return renderEntry(projectInput(turn), supportsContentArray)
+     return turn.rounds.flatMap((round) => {
+@@ -190,4 +190,35 @@ export function conversationToChatMessages(conversation: Conversation, supportsC
+       return projectRound(round).flatMap(entry => renderEntry(entry, supportsContentArray))
+     })
+   })
++  // Providers like Moonshot reject empty assistant messages in history (e.g. interrupted
++  // generations persisted with no content). Drop them at the final projection so no
++  // code path (history, provider transcript, or continuation) can leak one through.
++  return messages.filter((message) => {
++    if (message.role !== 'assistant')
++      return true
++    // Assistant messages that carry tool calls are valid even with empty text content.
++    const toolCalls = (message as { tool_calls?: unknown }).tool_calls
++    if (Array.isArray(toolCalls) && toolCalls.length > 0)
++      return true
++    const content = (message as { content?: unknown }).content
++    if (content == null)
++      return false
++    if (typeof content === 'string')
++      return content.trim().length > 0
++    if (Array.isArray(content)) {
++      // Content-part arrays count as empty when every part carries no text
++      // (e.g. [{ type: 'text', text: '' }] from interrupted generations).
++      return content.some((part) => {
++        if (part == null)
++          return false
++        if (typeof part === 'string')
++          return part.trim().length > 0
++        const text = (part as { text?: unknown }).text
++        if (typeof text === 'string')
++          return text.trim().length > 0
++        return true
++      })
++    }
++    return true
++  })
+ }
+diff --git a/packages/core-agent/src/runtime/chat-orchestrator-runtime.ts b/packages/core-agent/src/runtime/chat-orchestrator-runtime.ts
+index e230dfb..a71a7fe 100644
+--- a/packages/core-agent/src/runtime/chat-orchestrator-runtime.ts
++++ b/packages/core-agent/src/runtime/chat-orchestrator-runtime.ts
+@@ -501,6 +501,18 @@ export function createChatOrchestratorRuntime(deps: ChatOrchestratorRuntimeDeps)
+     const nowTs = now()
+     const messagesById = new Map(history.flatMap(message => message.id ? [[message.id, message] as const] : []))
+     const turns = history.flatMap((message, historyIndex): Turn[] => {
++      if (message.role === 'assistant') {
++        // Providers like Moonshot reject empty assistant messages in history.
++        // Interrupted generations can be persisted with no content at all; skip those.
++        const hasTranscript = Boolean(message.generationTranscript)
++          || (Array.isArray(message.providerTranscript) && message.providerTranscript.length > 0)
++        const rawContent = (message as { content?: unknown }).content
++        const isEmpty = rawContent == null
++          || (typeof rawContent === 'string' && !rawContent.trim())
++          || (Array.isArray(rawContent) && rawContent.length === 0)
++        if (!hasTranscript && isEmpty)
++          return []
++      }
+       if (message.role === 'assistant' && message.generationTranscript)
+         return [structuredClone(unwrapMessage(message.generationTranscript))]
+       const source = message.role === 'user'
+diff --git a/packages/core-agent/src/runtime/llm-service.ts b/packages/core-agent/src/runtime/llm-service.ts
+index eb16b88..093e3f0 100644
+--- a/packages/core-agent/src/runtime/llm-service.ts
++++ b/packages/core-agent/src/runtime/llm-service.ts
+@@ -43,6 +43,10 @@ async function streamOnce({
+ 
+   const scope = createContinuationScope(request.config, { ...options, providerId: initialStep?.providerId ?? options?.providerId })
+ 
++  // 流水线阶段指示器：大模型计时（首字延迟 / 总耗时）
++  const llmT0 = performance.now()
++  let llmFirstTokenAt = -1
++
+   return new Promise<void>((resolve, reject) => {
+     let settled = false
+     let stepsSettled = false
+@@ -61,8 +65,14 @@ async function streamOnce({
+ 
+     const onEvent = async (streamEvent: StreamEvent) => {
+       try {
+-        if (streamEvent != null)
++        if (streamEvent != null) {
++          // 流水线阶段指示器：记录首字时间
++          if (llmFirstTokenAt < 0 && (streamEvent as { type?: string }).type === 'text-delta') {
++            llmFirstTokenAt = performance.now()
++            window.dispatchEvent(new CustomEvent('airi:stage', { detail: { stage: 'llm', phase: 'first', ms: Math.round(llmFirstTokenAt - llmT0) } }))
++          }
+           await options?.onStreamEvent?.(streamEvent)
++        }
+         if (streamEvent?.type === 'error')
+           rejectOnce(streamEvent.error)
+       }
+@@ -91,6 +101,8 @@ async function streamOnce({
+         stepsSettled = true
+         try {
+           const generatedTurn = await streamResult.generatedTurn
++          // 流水线阶段指示器：大模型整体完成
++          window.dispatchEvent(new CustomEvent('airi:stage', { detail: { stage: 'llm', phase: 'done', ms: Math.round(performance.now() - llmT0) } }))
+           await options?.onStreamEvent?.({ type: 'finish' })
+           if (options?.abortSignal?.aborted)
+             throw options.abortSignal.reason
+diff --git a/packages/provider-inference/src/providers/cloud/openai-audio/index.ts b/packages/provider-inference/src/providers/cloud/openai-audio/index.ts
+index 154f447..576e2b8 100644
+--- a/packages/provider-inference/src/providers/cloud/openai-audio/index.ts
++++ b/packages/provider-inference/src/providers/cloud/openai-audio/index.ts
+@@ -257,7 +257,7 @@ export const providerOpenAICompatibleAudioTranscription = defineProvider<OpenAIC
+   tasks: ['speech-to-text', 'automatic-speech-recognition', 'asr', 'stt'],
+   icon: 'i-lobe-icons:openai',
+   capabilities: {
+-    transcription: { protocol: 'http', generateOutput: true, streamOutput: false, streamInput: false },
++    transcription: { protocol: 'http', generateOutput: true, streamOutput: true, streamInput: true },
+   },
+   createProviderConfig: ({ t }) => createAudioConfigSchema(openAICompatibleAudioConfigSchema, t),
+   createProvider: createTranscriptionProvider,
+diff --git a/packages/stage-ui/package.json b/packages/stage-ui/package.json
+index 37560df..c3bd8bf 100644
+--- a/packages/stage-ui/package.json
++++ b/packages/stage-ui/package.json
+@@ -42,6 +42,7 @@
+     "./models/*": "./src/models/*.ts",
+     "./services/*": "./src/services/*.ts",
+     "./tools/mcp": "./src/tools/mcp.ts",
++    "./tools/claude-code": "./src/tools/claude-code.ts",
+     "./stores/character": "./src/stores/character/index.ts",
+     "./stores/settings/analytics": "./src/stores/settings/analytics.ts",
+     "./stores/settings/stage-model": "./src/stores/settings/stage-model.ts",
+diff --git a/packages/stage-ui/src/libs/providers/providers/official/index.ts b/packages/stage-ui/src/libs/providers/providers/official/index.ts
+index 829a79d..ce91cf4 100644
+--- a/packages/stage-ui/src/libs/providers/providers/official/index.ts
++++ b/packages/stage-ui/src/libs/providers/providers/official/index.ts
+@@ -346,7 +346,7 @@ export const providerOfficialTranscription = defineProvider({
+   capabilities: {
+     transcription: {
+       protocol: 'http',
+-      generateOutput: false,
++      generateOutput: true,
+       streamOutput: true,
+       streamInput: true,
+     },
+@@ -355,8 +355,9 @@ export const providerOfficialTranscription = defineProvider({
+   createProvider(_config) {
+     return {
+       transcription: (model: string) => ({
+-        baseURL: new URL(`${SERVER_URL}/api/v1/audio/transcriptions/stream`),
+-        fetch: withCredentials(),
++        // 本地数字人方案：官方识别改道到本地 faster-whisper 服务
++        //（录音走 /v1/audio/transcriptions，直播走 ws://…:8931/ws，由 WS 执行器转换）
++        baseURL: new URL('http://localhost:8931/v1/'),
+         model,
+       }),
+     }
+diff --git a/packages/stage-ui/src/stores/chat.ts b/packages/stage-ui/src/stores/chat.ts
+index 75c2a59..3104fb9 100644
+--- a/packages/stage-ui/src/stores/chat.ts
++++ b/packages/stage-ui/src/stores/chat.ts
+@@ -6,6 +6,7 @@ import type { SyncedPiniaRuntime } from 'pinia-plugin-synced'
+ 
+ import type { ChatHistoryItem, ChatToolReference, StreamingAssistantMessage } from '../types/chat'
+ import type { ToolCallRerunPayload } from './tool-call-rerun'
++import { useClaudeBridgeStore } from './claude-bridge'
+ 
+ import { errorMessageFrom } from '@moeru/std'
+ import { createChatOrchestratorRuntime, renderConversationPreview } from '@proj-airi/core-agent'
+@@ -516,6 +517,19 @@ export const useChatStore = defineStore('chat', () => {
+     options: ChatOrchestratorSendOptions,
+     targetSessionId?: string,
+   ) {
++    // Claude Code bridge: while a task question is pending, route this message
++    // to the bridge as the answer instead of sending it to the LLM.
++    const claudeBridge = useClaudeBridgeStore()
++    if (claudeBridge.hasPendingQuestion()) {
++      chatSession.appendSessionMessage(targetSessionId ?? chatSession.activeSessionId, {
++        id: nanoid(),
++        role: 'user',
++        content: sendingMessage,
++        createdAt: Date.now(),
++      } as ChatHistoryItem)
++      await claudeBridge.answer(sendingMessage)
++      return
++    }
+     return runtime.ingest(sendingMessage, options, targetSessionId)
+   }
+ 
+@@ -564,7 +578,7 @@ export const useChatStore = defineStore('chat', () => {
+     if (!chatProvider)
+       throw new Error(`Failed to resolve chat provider "${providerId}"`)
+ 
+-    await runtime.ingest(payload.text, {
++    await ingest(payload.text, {
+       model: modelId,
+       chatProvider,
+       attachments: payload.attachments,
+diff --git a/packages/stage-ui/src/stores/modules/default.ts b/packages/stage-ui/src/stores/modules/default.ts
+index ff612f2..af445d4 100644
+--- a/packages/stage-ui/src/stores/modules/default.ts
++++ b/packages/stage-ui/src/stores/modules/default.ts
+@@ -9,7 +9,9 @@ import { useVisionStore } from './vision'
+ // Vision provider instances use a category prefix but share the official chat definition.
+ const officialModuleDefaults = {
+   consciousness: { provider: OFFICIAL_CHAT_PROVIDER_ID, model: 'auto' },
+-  hearing: { provider: OFFICIAL_TRANSCRIPTION_PROVIDER_ID, model: 'auto' },
++  // 本地数字人方案：识别默认走本地 faster-whisper（OpenAI 兼容接口），
++  // 避免默认配置把识别指向需要联网的官方云服务。
++  hearing: { provider: 'openai-compatible-audio-transcription', model: 'whisper-1' },
+   speech: { provider: OFFICIAL_SPEECH_PROVIDER_ID, model: 'auto' },
+   vision: { provider: OFFICIAL_VISION_PROVIDER_ID, model: 'auto' },
+ } as const
+diff --git a/packages/stage-ui/src/stores/modules/hearing.ts b/packages/stage-ui/src/stores/modules/hearing.ts
+index cf5331e..0c80298 100644
+--- a/packages/stage-ui/src/stores/modules/hearing.ts
++++ b/packages/stage-ui/src/stores/modules/hearing.ts
+@@ -25,6 +25,7 @@ import { createVadStreamingSession } from '../../libs/audio/vad-streaming-sessio
+ import { OFFICIAL_TRANSCRIPTION_PROVIDER_ID } from '../../libs/providers'
+ import { APPLE_SPEECH_TRANSCRIPTION_PROVIDER_ID, executeAppleSpeechStream } from '../../libs/providers/providers/apple-speech'
+ import { executeSherpawStream, SHERPAW_TRANSCRIPTION_PROVIDER_ID } from '../../libs/providers/providers/sherpaw'
++import { localWsTranscription } from '../../libs/providers/local-ws-transcription'
+ import { streamTranscription } from '../../libs/providers/stream-transcription'
+ import { useVAD } from '../ai/models/vad'
+ import { useProviderConfigStore } from '../providers/config'
+@@ -244,9 +245,10 @@ export function resolveTranscriptionFileName(file: File, explicitFileName?: stri
+ 
+ const STREAM_TRANSCRIPTION_EXECUTORS: Record<string, StreamTranscription> = {
+   'aliyun-nls-transcription': streamTranscription,
++  'openai-compatible-audio-transcription': localWsTranscription,
+   [SHERPAW_TRANSCRIPTION_PROVIDER_ID]: executeSherpawStream,
+   [APPLE_SPEECH_TRANSCRIPTION_PROVIDER_ID]: executeAppleSpeechStream,
+-  [OFFICIAL_TRANSCRIPTION_PROVIDER_ID]: streamTranscription,
++  [OFFICIAL_TRANSCRIPTION_PROVIDER_ID]: localWsTranscription,
+   // Web Speech API is handled specially in transcribeForMediaStream since it works directly with MediaStream
+ }
+ 
+@@ -338,7 +340,10 @@ export const useHearingStore = defineStore('hearing-store', () => {
+   const persistenceOptions = { listenToStorageChanges: false }
+ 
+   // State
+-  const activeTranscriptionProvider = useLocalStorageManualReset('settings/hearing/active-provider', '', persistenceOptions)
++  // Default to Sherpaw (local, offline, zh-en) instead of leaving it empty —
++  // browser-web-speech-api fails silently on networks where the browser's
++  // cloud recognition endpoint is unreachable.
++  const activeTranscriptionProvider = useLocalStorageManualReset('settings/hearing/active-provider', SHERPAW_TRANSCRIPTION_PROVIDER_ID, persistenceOptions)
+   const activeTranscriptionModel = useLocalStorageManualReset('settings/hearing/active-model', '', persistenceOptions)
+   const activeCustomModelName = useLocalStorageManualReset('settings/hearing/active-custom-model', '', persistenceOptions)
+   const transcriptionModelSearchQuery = refManualReset<string>('')
+@@ -516,12 +521,16 @@ export const useHearingStore = defineStore('hearing-store', () => {
+       }
+ 
+       const useVerboseJson = !format && confidenceThreshold.value > CONFIDENCE_THRESHOLD_DISABLED
++      // 流水线阶段指示器：blob 上传识别计时
++      const asrT0 = performance.now()
++      window.dispatchEvent(new CustomEvent('airi:stage', { detail: { stage: 'asr', phase: 'start' } }))
+       const response = await generateTranscription({
+         ...provider.transcription(model, options?.providerOptions),
+         file: normalizedInput.file,
+         fileName: resolveTranscriptionFileName(normalizedInput.file, normalizedInput.fileName),
+         responseFormat: useVerboseJson ? 'verbose_json' : format,
+       })
++      window.dispatchEvent(new CustomEvent('airi:stage', { detail: { stage: 'asr', phase: 'done', ms: Math.round(performance.now() - asrT0) } }))
+ 
+       if (useVerboseJson) {
+         if (response.segments) {
+@@ -1001,6 +1010,10 @@ export const useHearingSpeechInputPipeline = defineStore('modules:hearing:speech
+   ) {
+     let vadSession!: NonNullable<typeof streamingVadSession.value>
+     const vad = useVAD(vadWorkletUrl, {
++      // 说话停顿时长超过该值就判定「一句话说完」并触发发送。
++      // 默认 1200ms 太慢（说完还要等 1.2s），600ms 更接近自然对话节奏；
++      // 若觉得会被中途切断（停顿较长的从句被截断），可调大到 700~800。
++      minSilenceDurationMs: 600,
+       onSpeechStart: () => {
+         const segment: VadSpeechSegment = { audioChunks: [] }
+         vadSession.activeSegment = segment
+diff --git a/packages/stage-ui/src/stores/modules/speech.ts b/packages/stage-ui/src/stores/modules/speech.ts
+index d8715fe..ef39ee6 100644
+--- a/packages/stage-ui/src/stores/modules/speech.ts
++++ b/packages/stage-ui/src/stores/modules/speech.ts
+@@ -528,11 +528,15 @@ export const useSpeechStore = defineStore('speech', () => {
+       || activeSpeechProvider.value === OFFICIAL_SPEECH_STREAMING_PROVIDER_ID
+       ? withAiriTtsAnalytics(providerConfig, analytics)
+       : providerConfig
++    // 流水线阶段指示器：语音合成计时
++    const ttsT0 = performance.now()
++    window.dispatchEvent(new CustomEvent('airi:stage', { detail: { stage: 'tts', phase: 'start', note: input.slice(0, 12) } }))
+     const response = await generateSpeech({
+       ...provider.speech(model, requestProviderConfig),
+       input,
+       voice,
+     })
++    window.dispatchEvent(new CustomEvent('airi:stage', { detail: { stage: 'tts', phase: 'done', ms: Math.round(performance.now() - ttsT0), note: input.slice(0, 12) } }))
+ 
+     return response
+   }
+diff --git a/packages/stage-ui/src/workers/vad/vad.ts b/packages/stage-ui/src/workers/vad/vad.ts
+index 924fbbf..b425d98 100644
+--- a/packages/stage-ui/src/workers/vad/vad.ts
++++ b/packages/stage-ui/src/workers/vad/vad.ts
+@@ -2,7 +2,7 @@ import type { PreTrainedModel } from '@huggingface/transformers'
+ 
+ import type { BaseVAD, BaseVADConfig, VADEventCallback, VADEvents } from '../../libs/audio/vad'
+ 
+-import { AutoModel, Tensor } from '@huggingface/transformers'
++import { AutoModel, env, Tensor } from '@huggingface/transformers'
+ 
+ /**
+  * Voice Activity Detection processor
+@@ -49,8 +49,15 @@ export class VAD implements BaseVAD {
+     try {
+       this.emit('status', { type: 'info', message: 'Loading VAD model...' })
+ 
+-      // Full-precision
+-      this.model = await AutoModel.from_pretrained('onnx-community/silero-vad', { config: { model_type: 'custom' } as any, dtype: 'fp32' })
++      // Full-precision, served locally from the app's public dir to avoid HuggingFace CDN slowness
++      // transformers.js v3 refuses absolute http(s) URLs as model IDs ("invalid model
++    // ID"). The supported local-load path is a hub-style ID resolved under
++    // env.localModelPath; local file hits are skipped in browsers unless
++    // allowLocalModels is set explicitly. Disallow remote fallback so the model
++    // can never be pulled from HuggingFace (slow CDN) again.
++    env.allowLocalModels = true
++    env.allowRemoteModels = false
++    this.model = await AutoModel.from_pretrained('silero-vad', { config: { model_type: 'custom' } as any, dtype: 'fp32' })
+       this.isReady = true
+ 
+       this.emit('status', { type: 'info', message: 'VAD model loaded successfully' })

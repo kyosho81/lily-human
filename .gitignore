@@ -1,0 +1,46 @@
+# =============================================================================
+# Third-party trees & large binaries - never commit
+# =============================================================================
+
+# airi is a third-party MIT fork (moeru-ai/airi). Our delta ships as
+# airi-patches/; clone airi separately, see airi-patches/README.md.
+/airi/
+
+# Model weights & binary wheels (download separately, see README)
+/models/
+/wheels/
+/envs/
+/.pnpm-store/
+
+# =============================================================================
+# Runtime output: logs, pid files, generated/test audio
+# =============================================================================
+*.log
+*.log.*
+*.pid
+*.wav
+
+# Machine-local / secret material - never publish
+/services/web-patches/config-restore.js
+/claude-bridge/config.json
+
+# =============================================================================
+# Language-specific build artifacts
+# =============================================================================
+__pycache__/
+*.pyc
+*.pyo
+.ipynb_checkpoints/
+
+node_modules/
+dist/
+out/
+.turbo/
+*.tsbuildinfo
+
+# OS/editor junk
+Thumbs.db
+.DS_Store
+*.swp
+.vscode/
+.idea/
