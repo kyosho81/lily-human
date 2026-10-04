@@ -34,7 +34,7 @@ voices/         TTS 音色克隆参考音频与参考文本（default）
 |---|---|
 | [moeru-ai/airi](https://github.com/moeru-ai/airi) | 前端（MIT，按其官方流程 pnpm 安装，再打本项目补丁） |
 | Python 3.12 + CUDA | 建议按 `wheels/` 里的 torch 2.9 cu126 安装（不入库，自行下载） |
-| [VoxCPM-0.5B](https://huggingface.co/OpenBMB/VoxCPM) | TTS 模型权重（约 1.5GB，不入库，放 `models/voxcpm-0.5b/`） |
+| [VoxCPM-0.5B](https://huggingface.co/OpenBMB/VoxCPM) | TTS 模型权重（约 1.5GB，不入库，见下方[下载方法](#下载-tts-权重voxcpm-05b约-15gb)） |
 | Faster-Whisper | ASR 模型首次运行自动下载 |
 | claude-agent-sdk | Claude 桥接依赖（安装需先 `pip install hatchling` 再 `--no-build-isolation`） |
 
@@ -44,10 +44,41 @@ voices/         TTS 音色克隆参考音频与参考文本（default）
 ## 快速开始
 
 1. 按 [airi-patches/README.md](airi-patches/README.md) 克隆并打好 AIRI 补丁，`pnpm install && pnpm build`
-2. 下载 VoxCPM 模型权重到 `models/voxcpm-0.5b/`
+2. 下载 VoxCPM 模型权重（见下节，约 1.5GB）
 3. 运行 `services/启动语音服务.bat`（自动按命令行杀旧进程、防双开，拉起全部 4 个服务 + 前端）
 4. 浏览器打开 `http://localhost:5173`，在设置里配置 LLM provider（如 Moonshot/Kimi）
    与本地 TTS/ASR（`http://localhost:8930/v1/`、`http://localhost:8931/v1/`）
+
+## 下载 TTS 权重（VoxCPM-0.5B，约 1.5GB）
+
+权重不入库，从官方源下载，放到 `models/voxcpm-0.5b/`。**国内用户推荐方式一（ModelScope，满速下载）**。
+
+**方式一：ModelScope（国内最快）**
+
+```bash
+pip install modelscope
+modelscope download --model OpenBMB/VoxCPM --local_dir models/voxcpm-0.5b
+```
+
+**方式二：HuggingFace CLI**
+
+```bash
+pip install huggingface_hub
+hf download OpenBMB/VoxCPM --local-dir models/voxcpm-0.5b
+# 旧版命令：huggingface-cli download OpenBMB/VoxCPM --local-dir models/voxcpm-0.5b
+```
+
+**方式三：git + LFS**
+
+```bash
+git lfs install
+git clone https://www.modelscope.cn/OpenBMB/VoxCPM.git models/voxcpm-0.5b
+# 或 https://huggingface.co/OpenBMB/VoxCPM
+```
+
+下载完成后目录应包含 `model.safetensors` 等模型文件。注意模型加载路径写死在
+`services/voxcpm_server.py` 的 `MODEL_PATH`（第 48 行，默认 `F:/digital-human/models/voxcpm-0.5b`），
+换目录请同步修改该常量。
 
 ## License
 
