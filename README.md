@@ -1,4 +1,4 @@
-# digital-human
+# lily-human
 
 本地运行的中文语音数字人：以 [AIRI](https://github.com/moeru-ai/airi) 为前端形象与对话框架，
 后端由一组本地 Python 微服务提供语音合成（TTS）、语音识别（ASR）和 Claude Code 语音桥接。

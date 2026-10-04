@@ -17,12 +17,12 @@ git checkout 2f59a4c
 
 ```bash
 # 在 airi 仓库根目录执行
-git apply /path/to/digital-human/airi-patches/airi-patch.diff
+git apply /path/to/lily-human/airi-patches/airi-patch.diff
 
 # 复制新增文件（保持目录结构）
-cp -r /path/to/digital-human/airi-patches/new-files/apps/stage-web/src/components/ClaudeBridgePanel.vue \
+cp -r /path/to/lily-human/airi-patches/new-files/apps/stage-web/src/components/ClaudeBridgePanel.vue \
       apps/stage-web/src/components/
-cp -r /path/to/digital-human/airi-patches/new-files/packages/stage-ui/src/. \
+cp -r /path/to/lily-human/airi-patches/new-files/packages/stage-ui/src/. \
       packages/stage-ui/src/
 ```
 
