@@ -4,7 +4,7 @@ import { storeToRefs } from 'pinia'
 import { nextTick, ref, watch } from 'vue'
 
 const bridge = useClaudeBridgeStore()
-const { activeTaskId, running, logLines, pendingQuestion } = storeToRefs(bridge)
+const { activeTaskId, activeTaskLabel, running, logLines, pendingQuestion } = storeToRefs(bridge)
 
 const collapsed = ref(false)
 const logEl = ref<HTMLElement | null>(null)
@@ -88,6 +88,7 @@ const STATUS_TEXT: Record<string, string> = {
   waiting: '等待回答',
   done: '完成',
   error: '出错',
+  cancelled: '已取消',
 }
 
 function statusText(status: string): string {
@@ -114,13 +115,13 @@ function statusText(status: string): string {
     <div class="cbp-header" title="拖拽可移动" @pointerdown="onHeaderPointerDown" @click="onHeaderClick">
       <span class="cbp-dot" :class="{ busy: running || bridge.hasWaitingTask }" />
       <span class="cbp-title">
-        Claude Code {{ running ? '执行中' : bridge.hasWaitingTask ? '等待回答' : '空闲' }}<template v-if="activeTaskId"> · {{ activeTaskId }}</template>
+        Claude Code {{ running ? '执行中' : bridge.hasWaitingTask ? '等待回答' : '空闲' }}<template v-if="activeTaskLabel"> · {{ activeTaskLabel }}</template>
       </span>
       <button class="cbp-btn" @click.stop="clear">
         清空
       </button>
       <button class="cbp-btn" @click.stop="hide">
-        ✕
+        ×
       </button>
       <button class="cbp-btn" @click.stop="collapsed = !collapsed">
         {{ collapsed ? '展开' : '收起' }}
@@ -152,10 +153,25 @@ function statusText(status: string): string {
           :title="t.preview || t.result || ''"
           @click="bridge.reattach(t.task_id)"
         >
-          <span class="cbp-task-id">{{ t.task_id }}</span>
+          <span class="cbp-task-id">{{ t.started_at_ms || t.started_at }}</span>
           <span class="cbp-task-status" :class="t.status">{{ statusText(t.status) }}</span>
-          <span class="cbp-task-time">{{ t.started_at }}</span>
           <span v-if="t.status === 'waiting' && t.preview" class="cbp-task-preview">{{ t.preview }}</span>
+          <button
+            v-if="t.status === 'running' || t.status === 'waiting'"
+            class="cbp-btn cbp-task-op"
+            title="强制取消"
+            @click.stop="bridge.cancelTask(t.task_id)"
+          >
+            取消
+          </button>
+          <button
+            v-else
+            class="cbp-btn cbp-task-op"
+            title="从列表删除"
+            @click.stop="bridge.deleteTask(t.task_id)"
+          >
+            删除
+          </button>
         </div>
       </div>
       <div ref="logEl" class="cbp-log">
@@ -259,7 +275,7 @@ function statusText(status: string): string {
 .cbp-body {
   display: flex;
   flex-direction: column;
-  max-height: 300px;
+  max-height: min(46vh, 460px);
 }
 
 .cbp-question {
@@ -306,14 +322,14 @@ function statusText(status: string): string {
 
 .cbp-log {
   overflow-y: auto;
-  padding: 8px 10px;
+  padding: 8px 10px 14px;
 }
 
 .cbp-tasks {
-  max-height: 110px;
+  max-height: min(30vh, 280px);
   overflow-y: auto;
   border-bottom: 1px solid rgb(255 255 255 / 10%);
-  padding: 4px 6px;
+  padding: 6px 6px 12px;
 }
 
 .cbp-task {
@@ -321,7 +337,7 @@ function statusText(status: string): string {
   flex-wrap: wrap;
   align-items: center;
   gap: 6px;
-  padding: 3px 6px;
+  padding: 5px 6px;
   border-radius: 6px;
   cursor: pointer;
 }
@@ -360,10 +376,16 @@ function statusText(status: string): string {
   color: #86efac;
 }
 
-.cbp-task-time {
+.cbp-task-status.cancelled {
+  color: #d4d4d4;
+  background: rgb(255 255 255 / 8%);
+}
+
+.cbp-task-op {
   margin-left: auto;
-  color: #737373;
   font-size: 11px;
+  padding: 0 6px;
+  flex-shrink: 0;
 }
 
 .cbp-task-preview {
@@ -377,7 +399,9 @@ function statusText(status: string): string {
 .cbp-line {
   white-space: pre-wrap;
   word-break: break-all;
-  padding: 1px 0;
+  overflow-wrap: anywhere;
+  line-height: 1.8;
+  padding: 2px 0;
   border-bottom: 1px solid rgb(255 255 255 / 4%);
 }
 </style>

@@ -23,6 +23,8 @@
 # Machine-local / secret material - never publish
 /services/web-patches/config-restore.js
 /claude-bridge/config.json
+/.mcp.json
+/logs/
 
 # =============================================================================
 # Language-specific build artifacts

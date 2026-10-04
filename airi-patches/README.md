@@ -28,18 +28,23 @@ cp -r /path/to/lily-human/airi-patches/new-files/packages/stage-ui/src/. \
 
 ## 补丁内容
 
-**修改（airi-patch.diff，14 个文件）：**
-- `apps/stage-web`：App.vue / main.ts / vite.config.ts（注册 claude_task 工具、
-  挂载 ClaudeBridgePanel、PWA selfDestroying 防旧缓存、Promise.withResolvers polyfill）
+**修改（airi-patch.diff，17 个文件）：**
+- `apps/stage-web`：App.vue（注册 claude_task 工具、挂载 ClaudeBridgePanel +
+  StopSpeakingButton）、main.ts（Promise.withResolvers polyfill）、
+  vite.config.ts（PWA selfDestroying 防旧缓存）、pages/index.vue
+  （语音入口丢弃计数 `__AIRI_VOICE` 探针、识别为空的 CC 面板提示）
 - `packages/stage-ui`：chat.ts ingest 包装（挂起提问期间消息路由到 /answer）、
   speech / hearing / default 模块（接本地 TTS/ASR）、providers/official、
-  package.json、vad.ts
+  package.json、vad.ts、components/scenes/Stage.vue（TTS 管线探针 `__AIRI_TTS__`
+  逐跳计数、"停止说话"把 abort signal 透传进在途 /audio/speech 请求、
+  TTS 会话打开失败可见）、stores/character（纯英文回复跳过 TTS 朗读）
 - `packages/core-agent`：chat-completions 请求清洗（剔除空 assistant 消息，兼容 Moonshot）、
   chat-orchestrator-runtime、llm-service
 - `packages/provider-inference`：openai-audio 小改
 
 **新增（new-files/）：**
 - `apps/stage-web/src/components/ClaudeBridgePanel.vue` — 右下角 Claude 执行实时日志面板
+- `apps/stage-web/src/components/StopSpeakingButton.vue` — 停止说话按钮（取消在途 TTS/播报）
 - `packages/stage-ui/src/stores/claude-bridge.ts` — pinia store：SSE 事件流 / 提问状态 / TTS 播报
 - `packages/stage-ui/src/tools/claude-code.ts` — Kimi 工具 `claude_task` 定义
 - `packages/stage-ui/src/libs/providers/local-ws-transcription/` — 本地 WebSocket ASR 提供方

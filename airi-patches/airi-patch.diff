@@ -1,5 +1,5 @@
 diff --git a/apps/stage-web/src/App.vue b/apps/stage-web/src/App.vue
-index e930e40..a844341 100644
+index e930e40..a1b0fbb 100644
 --- a/apps/stage-web/src/App.vue
 +++ b/apps/stage-web/src/App.vue
 @@ -6,7 +6,9 @@ import { usePiniaSynced } from '@proj-airi/stage-ui/libs/pinia'
@@ -12,15 +12,16 @@ index e930e40..a844341 100644
  import { useDisplayModelsStore } from '@proj-airi/stage-ui/stores/display-models'
  import { useModsServerChannelStore } from '@proj-airi/stage-ui/stores/mods/api/channel-server'
  import { useContextBridgeStore } from '@proj-airi/stage-ui/stores/mods/api/context-bridge'
-@@ -29,6 +31,7 @@ import { RouterView, useRouter } from 'vue-router'
+@@ -29,6 +31,8 @@ import { RouterView, useRouter } from 'vue-router'
  import { toast, Toaster } from 'vue-sonner'
  
  import PerformanceOverlay from './components/Devtools/PerformanceOverlay.vue'
 +import ClaudeBridgePanel from './components/ClaudeBridgePanel.vue'
++import StopSpeakingButton from './components/StopSpeakingButton.vue'
  
  import { usePWAStore } from './stores/pwa'
  
-@@ -44,6 +47,17 @@ const settings = storeToRefs(settingsStore)
+@@ -44,6 +48,17 @@ const settings = storeToRefs(settingsStore)
  const onboardingStore = useOnboardingStore()
  const chatStore = useChatStore()
  const syncedPinia = usePiniaSynced()
@@ -38,11 +39,12 @@ index e930e40..a844341 100644
  const serverChannelStore = useModsServerChannelStore()
  const characterOrchestratorStore = useCharacterOrchestratorStore()
  const settingsAudioDeviceStore = useSettingsAudioDevice()
-@@ -225,6 +239,7 @@ function openOnboardingAfterStartup() {
+@@ -225,6 +240,8 @@ function openOnboardingAfterStartup() {
        @skipped="onboardingStore.markSetupSkipped()"
      />
  
 +    <ClaudeBridgePanel />
++    <StopSpeakingButton />
      <PerformanceOverlay />
    </StartupOverlay>
  </template>
@@ -71,6 +73,56 @@ index 4bdf8e0..a0a3fa4 100644
  import Tres from '@tresjs/core'
  import NProgress from 'nprogress'
  
+diff --git a/apps/stage-web/src/pages/index.vue b/apps/stage-web/src/pages/index.vue
+index 40eea2f..10aebd9 100644
+--- a/apps/stage-web/src/pages/index.vue
++++ b/apps/stage-web/src/pages/index.vue
+@@ -101,17 +101,35 @@ const {
+ let stopOnStopRecord: (() => void) | undefined
+ let currentBinding: VoiceInputBinding | undefined
+ 
++// Diagnostics probe: voice-entry drop counters (surfaced in stage-monitor).
++const voiceProbe = ((window as any).__AIRI_VOICE ??= {}) as { recv: number, empty: number, noModel: number, sent: number, err: number }
++voiceProbe.recv ??= 0
++voiceProbe.empty ??= 0
++voiceProbe.noModel ??= 0
++voiceProbe.sent ??= 0
++voiceProbe.err ??= 0
++
+ async function sendVoiceInputTextToChat(text: string | undefined) {
+-  if (!text?.trim())
++  voiceProbe.recv++
++  if (!text?.trim()) {
++    voiceProbe.empty++
++    // Short spoken answers ("同意") occasionally transcribe to nothing; say
++    // so on the CC panel instead of failing silently while a question waits.
++    if (useClaudeBridgeStore().hasPendingQuestion())
++      useClaudeBridgeStore().pushLog('# 语音识别为空，回答未送出（请再说一次或点按钮）')
+     return
++  }
+ 
+   try {
+     const providerId = activeChatProvider.value
+     const model = activeChatModel.value
+-    if (!providerId || !model)
++    if (!providerId || !model) {
++      voiceProbe.noModel++
+       return
++    }
+ 
+     const provider = await consciousnessStore.getChatProviderInstance(providerId)
++    voiceProbe.sent++
+ 
+     await chatStore.ingest(text, {
+       model,
+@@ -121,6 +139,7 @@ async function sendVoiceInputTextToChat(text: string | undefined) {
+     })
+   }
+   catch (error) {
++    voiceProbe.err++
+     console.error('Failed to send chat from voice:', error)
+   }
+ }
 diff --git a/apps/stage-web/vite.config.ts b/apps/stage-web/vite.config.ts
 index c9e514b..26db2cd 100644
 --- a/apps/stage-web/vite.config.ts
@@ -224,6 +276,172 @@ index 37560df..c3bd8bf 100644
      "./stores/character": "./src/stores/character/index.ts",
      "./stores/settings/analytics": "./src/stores/settings/analytics.ts",
      "./stores/settings/stage-model": "./src/stores/settings/stage-model.ts",
+diff --git a/packages/stage-ui/src/components/scenes/Stage.vue b/packages/stage-ui/src/components/scenes/Stage.vue
+index 876d12b..2d442ae 100644
+--- a/packages/stage-ui/src/components/scenes/Stage.vue
++++ b/packages/stage-ui/src/components/scenes/Stage.vue
+@@ -455,17 +455,27 @@ function resolveStageVoiceType(): 'official_selected' | 'custom_configured' {
+ 
+ const speechPipeline = createSpeechPipeline<AudioBuffer>({
+   tts: async (request, signal) => {
+-    if (signal.aborted)
++    ttsProbe.ttsCalls++
++    ttsProbe.host = speechRuntimeStore.isHost()
++    if (signal.aborted) {
++      ttsProbe.drop = 'aborted'
+       return null
++    }
+ 
+-    if (speechMuted.value)
++    if (speechMuted.value) {
++      ttsProbe.drop = 'muted'
+       return null
++    }
+ 
+-    if (activeSpeechProvider.value === 'speech-noop')
++    if (activeSpeechProvider.value === 'speech-noop') {
++      ttsProbe.drop = 'noop-provider'
+       return null
++    }
+ 
+-    if (!activeSpeechProvider.value)
++    if (!activeSpeechProvider.value) {
++      ttsProbe.drop = 'no-provider'
+       return null
++    }
+ 
+     // Streaming provider must NEVER reach this per-segment callback. The
+     // streaming code path opens its own ws at `onBeforeMessageComposed`
+@@ -476,6 +486,7 @@ const speechPipeline = createSpeechPipeline<AudioBuffer>({
+     // segment — exactly the behavior the refactor is meant to delete.
+     // Codex review MEDIUM #3: refuse loudly instead.
+     if (resolveSpeechTransport(activeSpeechProvider.value) === 'bidirectional-ws') {
++      ttsProbe.drop = 'ws-fallback:' + activeSpeechProvider.value
+       console.warn('[Speech Pipeline] bidirectional-ws provider reached per-segment fallback', {
+         reason: 'streaming session was not opened at intent start (voice unset?)',
+         provider: activeSpeechProvider.value,
+@@ -486,12 +497,15 @@ const speechPipeline = createSpeechPipeline<AudioBuffer>({
+ 
+     const provider = await providersStore.getProviderInstance(activeSpeechProvider.value) as SpeechProviderWithExtraOptions<string, UnElevenLabsOptions>
+     if (!provider) {
++      ttsProbe.drop = 'provider-init-failed'
+       console.error('Failed to initialize speech provider')
+       return null
+     }
+ 
+-    if (!request.text && !request.special)
++    if (!request.text && !request.special) {
++      ttsProbe.drop = 'empty-segment'
+       return null
++    }
+ 
+     const providerConfig = providerStore.getProviderConfig(activeSpeechProvider.value)
+ 
+@@ -537,10 +551,15 @@ const speechPipeline = createSpeechPipeline<AudioBuffer>({
+       }
+     }
+ 
+-    if (!model || !voice)
++    if (!model || !voice) {
++      ttsProbe.drop = 'no-mv p=' + JSON.stringify(activeSpeechProvider.value)
++        + ' model=' + JSON.stringify(model) + ' voice=' + (voice ? 'set' : 'null')
++        + ' cfg=' + JSON.stringify(providerStore.getProviderConfig(activeSpeechProvider.value)).slice(0, 80)
+       return null
++    }
+ 
+     try {
++      ttsProbe.stage = 'mv-ok'
+       const speechRequest = speechStore.resolveSpeechInput({
+         text: request.text,
+         voice,
+@@ -555,6 +574,7 @@ const speechPipeline = createSpeechPipeline<AudioBuffer>({
+       // Non-streaming providers only: synth via REST. Streaming provider
+       // was already early-returned above; it owns its own ws path opened
+       // in `onBeforeMessageComposed`.
++      ttsProbe.stage = 'calling-speech'
+       const res = await speechStore.speech(
+         provider,
+         model,
+@@ -567,6 +587,10 @@ const speechPipeline = createSpeechPipeline<AudioBuffer>({
+           voice_type: resolveStageVoiceType(),
+           ...(request.turnId != null && { turn_id: request.turnId }),
+         },
++        // Forward the pipeline intent's abort signal so pressing "stop
++        // speaking" aborts the in-flight /audio/speech request instead of
++        // letting the TTS server keep synthesizing a discarded sentence.
++        signal,
+       )
+ 
+       if (signal.aborted || !res || res.byteLength === 0)
+@@ -582,6 +606,7 @@ const speechPipeline = createSpeechPipeline<AudioBuffer>({
+       // failures (truncated session, network drop, billing rejection) now
+       // produce visible diagnostic lines — see codex review item #6.
+       if (!signal.aborted) {
++        ttsProbe.drop = 'threw: ' + String(err).slice(0, 60)
+         console.error('[Speech Pipeline] tts() failed', {
+           provider: activeSpeechProvider.value,
+           model,
+@@ -736,6 +761,15 @@ function setupAnalyser() {
+ // decision point. See `packages/stage-ui/src/libs/speech/tts-session.ts`.
+ let currentSession: StageTtsSession | null = null
+ 
++// Diagnostics probe: per-hop counters surfaced in the stage-monitor panel so
++// a broken tab (LLM text but no /audio/speech requests) can be pinpointed.
++const ttsProbe = (((window as any).__AIRI_TTS__ ??= {}) as { host: boolean, sessions: number, openErr: number, tokens: number, ttsCalls: number, req: number, drop: string | null })
++ttsProbe.sessions ??= 0
++ttsProbe.openErr ??= 0
++ttsProbe.tokens ??= 0
++ttsProbe.ttsCalls ??= 0
++ttsProbe.req ??= 0
++
+ function stopSpeechOutput(reason: string) {
+   currentSession?.cancel(reason)
+   currentSession = null
+@@ -875,9 +909,19 @@ chatHookCleanups.push(onBeforeMessageComposed(async (_message, context) => {
+   if (speechMuted.value)
+     return
+ 
+-  setupAnalyser()
+-  await setupLipSync()
+-  currentSession = openTtsSession(context.turnId)
++  try {
++    setupAnalyser()
++    await setupLipSync()
++    currentSession = openTtsSession(context.turnId)
++    ttsProbe.sessions++
++    ttsProbe.host = speechRuntimeStore.isHost()
++  }
++  catch (error) {
++    // Without a session every later token hits `currentSession?.` = null and
++    // is dropped silently: chat shows the reply, zero requests reach TTS.
++    ttsProbe.openErr++
++    console.error('[Stage] failed to open TTS session', error)
++  }
+ }))
+ 
+ chatHookCleanups.push(onBeforeSend(async () => {
+@@ -885,6 +929,7 @@ chatHookCleanups.push(onBeforeSend(async () => {
+ }))
+ 
+ chatHookCleanups.push(onTokenLiteral(async (literal) => {
++  ttsProbe.tokens++
+   currentSession?.appendText(literal)
+ }))
+ 
+@@ -904,6 +949,13 @@ chatHookCleanups.push(onStreamEnd(async () => {
+ }))
+ 
+ chatHookCleanups.push(onAssistantResponseEnd(async (_message) => {
++  // Probe: a real completed turn (restored history never fires this hook).
++  try {
++    ttsProbe.ends = (ttsProbe.ends ?? 0) + 1
++    const c = (_message as any)?.content
++    ttsProbe.endTxt = typeof c === 'string' ? c.slice(0, 60) : JSON.stringify(c)?.slice(0, 60) ?? ''
++  }
++  catch { /* probe best-effort */ }
+   currentSession?.end()
+   // Streaming sessions null-out via the onDone hook; segmenter sessions
+   // stay around until the next `onBeforeMessageComposed` cancels them
 diff --git a/packages/stage-ui/src/libs/providers/providers/official/index.ts b/packages/stage-ui/src/libs/providers/providers/official/index.ts
 index 829a79d..ce91cf4 100644
 --- a/packages/stage-ui/src/libs/providers/providers/official/index.ts
@@ -249,6 +467,39 @@ index 829a79d..ce91cf4 100644
          model,
        }),
      }
+diff --git a/packages/stage-ui/src/stores/character/index.ts b/packages/stage-ui/src/stores/character/index.ts
+index 2187086..3dd8bd5 100644
+--- a/packages/stage-ui/src/stores/character/index.ts
++++ b/packages/stage-ui/src/stores/character/index.ts
+@@ -43,7 +43,28 @@ export const useCharacterStore = defineStore('character', () => {
+   const streamingReactions = ref<Map<string, StreamingReactionState>>(new Map())
+   const speechRuntimeStore = useSpeechRuntimeStore()
+ 
++  /**
++   * True when the text is predominantly Latin letters with no meaningful CJK
++   * content (an English reply or instruction). Such text is shown on screen
++   * but never spoken — the user only wants Chinese utterances read aloud.
++   */
++  function isMostlyEnglish(text: string): boolean {
++    const letters = text.match(/[a-zA-Z\u4e00-\u9fff]/g)
++    if (!letters || letters.length < 6)
++      return false
++    let latin = 0
++    for (const ch of letters) {
++      if (ch.charCodeAt(0) < 128)
++        latin++
++    }
++    return latin / letters.length > 0.7
++  }
++
+   async function emitTextOutput(text: string) {
++    if (isMostlyEnglish(text)) {
++      console.log('[character] skip English TTS:', text.slice(0, 100))
++      return
++    }
+     const intent = speechRuntimeStore.openIntent({
+       ownerId: ownerId.value,
+       priority: 'normal',
 diff --git a/packages/stage-ui/src/stores/chat.ts b/packages/stage-ui/src/stores/chat.ts
 index 75c2a59..3104fb9 100644
 --- a/packages/stage-ui/src/stores/chat.ts
@@ -370,18 +621,26 @@ index cf5331e..0c80298 100644
          const segment: VadSpeechSegment = { audioChunks: [] }
          vadSession.activeSegment = segment
 diff --git a/packages/stage-ui/src/stores/modules/speech.ts b/packages/stage-ui/src/stores/modules/speech.ts
-index d8715fe..ef39ee6 100644
+index d8715fe..bd16afa 100644
 --- a/packages/stage-ui/src/stores/modules/speech.ts
 +++ b/packages/stage-ui/src/stores/modules/speech.ts
-@@ -528,11 +528,15 @@ export const useSpeechStore = defineStore('speech', () => {
+@@ -523,16 +523,23 @@ export const useSpeechStore = defineStore('speech', () => {
+       source: 'manual_preview',
+       voice_type: resolveVoiceType(voice),
+     },
++    abortSignal?: AbortSignal,
+   ): Promise<ArrayBuffer> {
+     const requestProviderConfig = activeSpeechProvider.value === OFFICIAL_SPEECH_PROVIDER_ID
        || activeSpeechProvider.value === OFFICIAL_SPEECH_STREAMING_PROVIDER_ID
        ? withAiriTtsAnalytics(providerConfig, analytics)
        : providerConfig
 +    // 流水线阶段指示器：语音合成计时
 +    const ttsT0 = performance.now()
 +    window.dispatchEvent(new CustomEvent('airi:stage', { detail: { stage: 'tts', phase: 'start', note: input.slice(0, 12) } }))
++    ;(((window as any).__AIRI_TTS__ ??= {}) as any).req = (((window as any).__AIRI_TTS__)?.req ?? 0) + 1
      const response = await generateSpeech({
        ...provider.speech(model, requestProviderConfig),
++      abortSignal,
        input,
        voice,
      })
