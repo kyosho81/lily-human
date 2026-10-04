@@ -19,7 +19,7 @@ rem ============================================================
 set /a ROUND=0
 :kill_loop
 set /a ROUND+=1
-powershell -NoProfile -Command "Get-CimInstance Win32_Process -Filter \"Name='python.exe'\" | Where-Object { $_.CommandLine -match 'voxcpm_server\.py|whisper_server\.py|channel_stub_server\.py|claude_bridge_server\.py' } | ForEach-Object { Write-Host ('  kill PID=' + $_.ProcessId); Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }"
+powershell -NoProfile -Command "Get-CimInstance Win32_Process -Filter \"Name='python.exe'\" | Where-Object { $_.CommandLine -match 'voxcpm_server\.py|whisper_server\.py|sensevoice_server\.py|channel_stub_server\.py|claude_bridge_server\.py' } | ForEach-Object { Write-Host ('  kill PID=' + $_.ProcessId); Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }"
 if %ROUND% GEQ 3 goto kill_done
 ping -n 3 127.0.0.1 >nul
 goto kill_loop
@@ -44,7 +44,7 @@ rem ============================================================
 rem  Start phase: skip start if a process is already running.
 rem ============================================================
 call :start_one "VoxCPM TTS" voxcpm_server.py 8930
-call :start_one "Faster-Whisper ASR" whisper_server.py 8931
+call :start_one "SenseVoiceSmall ASR" sensevoice_server.py 8931
 call :start_one "AIRI Channel Stub" channel_stub_server.py 6121
 call :start_one "Claude Bridge" "F:\digital-human\claude-bridge\claude_bridge_server.py" 8932
 

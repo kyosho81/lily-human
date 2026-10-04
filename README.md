@@ -35,7 +35,7 @@ voices/         TTS 音色克隆参考音频与参考文本（default）
 | [moeru-ai/airi](https://github.com/moeru-ai/airi) | 前端（MIT，按其官方流程 pnpm 安装，再打本项目补丁） |
 | Python 3.12 + CUDA | 建议按 `wheels/` 里的 torch 2.9 cu126 安装（不入库，自行下载） |
 | [VoxCPM-0.5B](https://huggingface.co/OpenBMB/VoxCPM) | TTS 模型权重（约 1.5GB，不入库，见下方[下载方法](#下载-tts-权重voxcpm-05b约-15gb)） |
-| Faster-Whisper | ASR 模型首次运行自动下载 |
+| [SenseVoiceSmall](https://www.modelscope.cn/models/iic/SenseVoiceSmall) | 默认 ASR（CPU 非自回归，中文专优，模型放 `models/models/iic--SenseVoiceSmall/`）；`whisper_server.py` 为同构可选项 |
 | claude-agent-sdk | Claude 桥接依赖（安装需先 `pip install hatchling` 再 `--no-build-isolation`） |
 
 > 启动脚本 `services/启动语音服务.bat` 内写的是本机绝对路径
