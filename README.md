@@ -45,8 +45,9 @@ voices/         TTS 音色克隆参考音频与参考文本（default）
 
 1. 按 [airi-patches/README.md](airi-patches/README.md) 克隆并打好 AIRI 补丁，`pnpm install && pnpm build`
 2. 下载 VoxCPM 模型权重（见下节，约 1.5GB）
-3. 运行 `services/启动语音服务.bat`（自动按命令行杀旧进程、防双开，拉起全部 4 个服务 + 前端）
-4. 浏览器打开 `http://localhost:5173`，在设置里配置 LLM provider（如 Moonshot/Kimi）
+3. `python services/apply_web_patches.py` —— **每次 vite build 后必跑**：把流水线面板/配置护栏注入 dist（vite 重建会冲掉）
+4. 运行 `services/启动语音服务.bat`（自动按命令行杀旧进程、防双开，拉起全部 4 个服务 + 前端）
+5. 浏览器打开 `http://localhost:5173`，在设置里配置 LLM provider（如 Moonshot/Kimi）
    与本地 TTS/ASR（`http://localhost:8930/v1/`、`http://localhost:8931/v1/`）
 
 ## 下载 TTS 权重（VoxCPM-0.5B，约 1.5GB）
