@@ -46,3 +46,5 @@ Thumbs.db
 *.swp
 .vscode/
 .idea/
+# voice-cloning source audio (609MB, regenerate from raw recordings)
+voices/_yinyue_src/
