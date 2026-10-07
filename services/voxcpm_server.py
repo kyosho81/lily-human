@@ -13,8 +13,17 @@ voice 参数：默认 "default" 用模型自带音色；
 """
 import argparse
 import io
+import os
 import threading
 import time
+
+# torchinductor/triton 默认把编译缓存放在系统 Temp 下，会被存储感知等
+# 清理任务在中途删掉，导致 InductorError: FileNotFoundError（tmp 目录消失）。
+# 固定到非 Temp 目录，避免再次复发。
+_CACHE_DIR = r"F:\digital-human\cache\torchinductor"
+os.makedirs(_CACHE_DIR, exist_ok=True)
+os.environ.setdefault("TORCHINDUCTOR_CACHE_DIR", _CACHE_DIR)
+os.environ.setdefault("TRITON_CACHE_DIR", os.path.join(_CACHE_DIR, "triton"))
 
 import numpy as np
 import soundfile as sf

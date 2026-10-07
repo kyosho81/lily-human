@@ -25,6 +25,7 @@
 /claude-bridge/config.json
 /.mcp.json
 /logs/
+/cache/
 
 # =============================================================================
 # Language-specific build artifacts

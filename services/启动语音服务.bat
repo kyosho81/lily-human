@@ -78,7 +78,9 @@ if errorlevel 1 (
 ) else (
     if not exist logs mkdir logs
     for %%F in ("%SCRIPT%") do set LOGNAME=%%~nF
-    start "%WINTITLE%" cmd /c ""%PY%" -u %SCRIPT% >> logs\!LOGNAME!.log 2>&1"
+    rem Tee-Object on PS 5.1 writes UTF-16LE, so hand-roll the tee:
+    rem echo each line to console AND append as UTF-8 no-BOM to the log file.
+    start "%WINTITLE%" powershell -NoProfile -ExecutionPolicy Bypass -Command "& '%PY%' -u %SCRIPT% *>&1 | ForEach-Object { $l = $_.ToString(); $l; [System.IO.File]::AppendAllText('logs\!LOGNAME!.log', $l + \"`n\", (New-Object System.Text.UTF8Encoding $false)) }"
     echo [start] %WINTITLE% %SCRIPT% port %SPORT%
 )
 exit /b 0
