@@ -1,4 +1,5 @@
 @echo off
+setlocal enabledelayedexpansion
 chcp 65001 >nul
 title Digital Human Local Services (TTS + ASR + Channel Stub)
 cd /d F:\digital-human\services
@@ -75,7 +76,9 @@ powershell -NoProfile -Command "if ((Get-CimInstance Win32_Process -Filter \"Nam
 if errorlevel 1 (
     echo [skip] %WINTITLE% already running, not starting a duplicate.
 ) else (
-    start "%WINTITLE%" "%PY%" %SCRIPT%
+    if not exist logs mkdir logs
+    for %%F in ("%SCRIPT%") do set LOGNAME=%%~nF
+    start "%WINTITLE%" cmd /c ""%PY%" -u %SCRIPT% >> logs\!LOGNAME!.log 2>&1"
     echo [start] %WINTITLE% %SCRIPT% port %SPORT%
 )
 exit /b 0
