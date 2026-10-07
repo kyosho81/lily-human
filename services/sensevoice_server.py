@@ -12,6 +12,7 @@ SenseVoiceSmall 为非自回归模型，CPU 上比 whisper-turbo 快数倍，中
 """
 import asyncio
 import json
+import os
 import re
 import time
 
@@ -63,6 +64,7 @@ def startup():
     # SenseVoice 单线程已很快（非自回归），并发 2 路防突发排队即可
     model_lock = threading.BoundedSemaphore(2)
     vad_lock = threading.Lock()
+    _speaker_init()
     print(f"[{_now()}] 模型就绪，耗时 {time.time()-t0:.0f}s", flush=True)
 
 
@@ -117,6 +119,97 @@ def _filter_echo(text: str) -> str:
         print(f"[{_now()}] 回声过滤：「{t[:25]}」与近期合成文本重复，丢弃", flush=True)
         return ""
     return t
+
+
+# ---------- 声纹过滤：把数字人自己的嗓音从识别输入中剔除 ----------
+# 与文本回声过滤互补：声纹层在 VAD 分段级别剔除"声音是丽丽"的语音段
+# （不管说的是什么），文本层再兜底内容重复的段。任何异常一律放行（fail-open）。
+_SPEAKER_MODEL = r"F:\digital-human\models\speaker_id\3dspeaker_speech_campplus_sv_zh-cn_16k-common.onnx"
+_SPEAKER_ENROLL_WAVS = [
+    r"F:\digital-human\voices\default.wav",                # 克隆提示音
+    r"F:\digital-human\models\speaker_id\enroll_tts.wav",  # 实际合成输出
+]
+_SPEAKER_SIM_THRESHOLD = float(os.environ.get("SPEAKER_SIM_THRESHOLD", "0.45"))
+_SPEAKER_MIN_SPAN_S = 0.6   # 短于该时长的 VAD 段特征不够，不做声纹判断直接放行
+
+speaker_extractor = None
+speaker_enrolled = None     # 归一化的登记嵌入（各登记音频嵌入的均值）
+
+
+def _speaker_embed(extractor, samples_f32: np.ndarray):
+    stream = extractor.create_stream()
+    stream.accept_waveform(SR, samples_f32)
+    stream.input_finished()
+    if not extractor.is_ready(stream):
+        return None
+    emb = np.asarray(extractor.compute(stream), dtype=np.float32)
+    n = float(np.linalg.norm(emb))
+    return emb / n if n > 1e-9 else None
+
+
+def _speaker_init():
+    global speaker_extractor, speaker_enrolled
+    try:
+        import sherpa_onnx
+        import soundfile as sf
+        extractor = sherpa_onnx.SpeakerEmbeddingExtractor(
+            sherpa_onnx.SpeakerEmbeddingExtractorConfig(
+                model=_SPEAKER_MODEL, num_threads=2))
+        embs = []
+        for path in _SPEAKER_ENROLL_WAVS:
+            samples, sr = sf.read(path, dtype="float32")
+            if samples.ndim > 1:
+                samples = samples.mean(axis=1)
+            if sr != SR:
+                import librosa
+                samples = librosa.resample(samples, orig_sr=sr, target_sr=SR)
+            emb = _speaker_embed(extractor, np.asarray(samples, dtype=np.float32))
+            if emb is not None:
+                embs.append(emb)
+        if not embs:
+            raise RuntimeError("no enrollment embeddings")
+        mean = np.mean(embs, axis=0)
+        speaker_enrolled = mean / (np.linalg.norm(mean) + 1e-9)
+        speaker_extractor = extractor
+        print(f"[{_now()}] 声纹过滤器就绪：登记 {len(embs)} 条音色，阈值 {_SPEAKER_SIM_THRESHOLD}",
+              flush=True)
+    except Exception as e:
+        speaker_extractor = None
+        print(f"[{_now()}] 声纹过滤器初始化失败（退回纯文本过滤）："
+              f"{type(e).__name__} {e}", flush=True)
+
+
+def _filter_speaker_spans(audio_f32: np.ndarray, spans) -> np.ndarray:
+    """剔除与登记音色（数字人）匹配的 VAD 语音段，返回剩余音频。"""
+    if speaker_extractor is None or speaker_enrolled is None or not spans:
+        return audio_f32
+    try:
+        kept = []
+        dropped = 0
+        for sp in spans:
+            seg = audio_f32[sp["start"]:sp["end"]]
+            if (sp["end"] - sp["start"]) < _SPEAKER_MIN_SPAN_S * SR:
+                kept.append(seg)
+                continue
+            emb = _speaker_embed(speaker_extractor, seg)
+            if emb is None:
+                kept.append(seg)
+                continue
+            sim = float(np.dot(emb, speaker_enrolled))
+            if sim >= _SPEAKER_SIM_THRESHOLD:
+                dropped += 1
+                print(f"[{_now()}] 声纹过滤：丢弃 {len(seg)/SR:.1f}s 语音段"
+                      f"（相似度 {sim:.2f}）", flush=True)
+                continue
+            kept.append(seg)
+        if dropped == 0:
+            return audio_f32
+        if not kept:
+            return np.zeros(0, dtype=np.float32)
+        return np.concatenate(kept)
+    except Exception as e:
+        print(f"[{_now()}] 声纹过滤异常（放行）：{type(e).__name__} {e}", flush=True)
+        return audio_f32
 
 
 def _transcribe_np(audio_f32: np.ndarray) -> str:
@@ -213,6 +306,10 @@ async def transcribe(file: UploadFile = File(...), model: str = Form("sensevoice
         return {"text": ""}
 
     t0 = time.time()
+    audio = _filter_speaker_spans(audio, spans)
+    if len(audio) < SR * 0.3:
+        print(f"[{_now()}] 声纹过滤后无剩余语音，返回空文本", flush=True)
+        return {"text": ""}
     text = await _transcribe(audio)
     text = _filter_echo(text)
     dur = time.time() - t0
@@ -225,6 +322,13 @@ async def _streaming_session(recv_chunk, send_event):
     """流式识别主逻辑（与 whisper_server 相同）。"""
     buf = bytearray()
     finalized = ""
+    dump = None
+    if os.environ.get("DUMP_WS_AUDIO") == "1":
+        import soundfile as sf
+        path = os.path.join(r"F:\digital-human\logs",
+                            f"ws_dump_{time.strftime('%H%M%S')}.wav")
+        dump = sf.SoundFile(path, "w", samplerate=SR, channels=1, subtype="PCM_16")
+        print(f"[{_now()}] WS 音频转储 → {path}", flush=True)
     try:
         while True:
             try:
@@ -237,6 +341,8 @@ async def _streaming_session(recv_chunk, send_event):
             if not chunk:
                 continue
             buf.extend(chunk)
+            if dump:
+                dump.write(np.frombuffer(bytes(chunk), dtype=np.int16))
             while len(buf) >= MIN_DRAIN_BYTES:
                 audio = _pcm16_to_f32(buf)
                 spans = await _vad_spans(audio)
@@ -257,10 +363,13 @@ async def _streaming_session(recv_chunk, send_event):
                 part = audio[:cut]
                 text = ""
                 if not skip_transcribe:
-                    t0 = time.time()
-                    text = await _transcribe(part)
-                    print(f"[{_now()}] 流式段识别 {len(part)/SR:.1f}s，"
-                          f"耗时 {time.time()-t0:.1f}s → {text[:30]}", flush=True)
+                    part_spans = [sp for sp in spans if sp["end"] <= cut]
+                    part = _filter_speaker_spans(part, part_spans)
+                    if len(part) >= SR * 0.3:
+                        t0 = time.time()
+                        text = await _transcribe(part)
+                        print(f"[{_now()}] 流式段识别 {len(part)/SR:.1f}s，"
+                              f"耗时 {time.time()-t0:.1f}s → {text[:30]}", flush=True)
                 if text:
                     finalized += text
                     await send_event({
@@ -277,8 +386,10 @@ async def _streaming_session(recv_chunk, send_event):
             audio = _pcm16_to_f32(buf)
             spans = await _vad_spans(audio)
             if spans:
-                tail = await _transcribe(audio)
-                print(f"[{_now()}] 收尾转写完成 → {tail[:30]}", flush=True)
+                audio = _filter_speaker_spans(audio, spans)
+                if len(audio) >= SR * 0.3:
+                    tail = await _transcribe(audio)
+                    print(f"[{_now()}] 收尾转写完成 → {tail[:30]}", flush=True)
         total = (finalized + tail).strip()
         total = _filter_echo(total)
         if total:
@@ -289,6 +400,9 @@ async def _streaming_session(recv_chunk, send_event):
             })
     except Exception as e:
         print(f"[{_now()}] 流式识别出错: {type(e).__name__} {e}", flush=True)
+    finally:
+        if dump:
+            dump.close()
 
 
 @app.websocket("/ws")
