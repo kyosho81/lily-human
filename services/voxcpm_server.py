@@ -165,7 +165,7 @@ def speech(req: SpeechRequest, request: Request):
             text,
             prompt_wav_path=prompt_wav,
             prompt_text=prompt_text,
-            inference_timesteps=6,  # 默认10步；6步平衡速度与听感（此前调为4步提速，现改回）
+            inference_timesteps=4,  # 默认10步；4步提速优先保吞吐（4GB 显存 RTF 仍 ~1.5x），听感损失可接受
         )
     finally:
         model_lock.release()
