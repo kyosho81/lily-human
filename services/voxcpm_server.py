@@ -152,21 +152,30 @@ def speech(req: SpeechRequest, request: Request):
         if os.path.exists(voice_txt):
             prompt_text = open(voice_txt, encoding="utf-8").read().strip()
 
-    t0 = time.time()
-    with model_lock:
+    t_arr = time.time()
+    # 4GB 显存只够串行合成；高峰期语音洪峰会把等待队列堆到几分钟，
+    # 排到时句子早已过期（用户新的语音输入会打断播放），
+    # 与其 stale 播放不如快速拒绝，让客户端丢句保最新。
+    if not model_lock.acquire(timeout=10):
+        return Response(content='{"error":"server busy"}', status_code=503,
+                        media_type="application/json")
+    try:
+        t0 = time.time()
         audio = model.generate(
             text,
             prompt_wav_path=prompt_wav,
             prompt_text=prompt_text,
             inference_timesteps=6,  # 默认10步；6步平衡速度与听感（此前调为4步提速，现改回）
         )
+    finally:
+        model_lock.release()
     dur = time.time() - t0
     with recent_lock:
         recent_speeches.append((time.time(), text))
         if len(recent_speeches) > RECENT_MAX:
             del recent_speeches[:len(recent_speeches) - RECENT_MAX]
     print(f"[{time.strftime('%H:%M:%S')}] 合成 {len(audio)/16000:.1f}s 音频，"
-          f"耗时 {dur:.1f}s（{req.input[:20]}...）", flush=True)
+          f"排队 {t0 - t_arr:.1f}s 耗时 {dur:.1f}s（{req.input[:20]}...）", flush=True)
     return Response(content=wav_bytes(np.asarray(audio)), media_type="audio/wav")
 
 
